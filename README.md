@@ -2,9 +2,9 @@
 
 **---- This node has been completly vibe-coded by Claude in order to recreate a similar tool 
      to ZDefocus in Nuke. The aim is to be able to define the level of Depth of field based on 
-     a normalised depth-map. THIS NODE IS BY NO MEAN PERFECT and I woudl really appriciate the 
+     a normalised depth-map. THIS NODE IS BY NO MEAN PERFECT and I would really appriciate the 
      support and collaboration of whoever would like to refine it and fix it, I just started my
-     journey and aeger to learn from seasoned developers ----**
+     journey and aeger to learn from experienced developers :) ----**
 
 Depth-based defocus node with:
 - **Aperture control (f-number)** for realistic DoF behavior.
