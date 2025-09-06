@@ -2,7 +2,7 @@
 # Modular Z-Defocus Pro nodes for ComfyUI
 #
 # This refactored version splits the original monolithic node into focused components:
-# - ZDefocusAnalyzer: Depth analysis and CoC calculation 
+# - ZDefocusAnalyzer: Depth analysis and CoC calculation
 # - ZDefocusVisualizer: Interactive depth visualization and focus point selection
 # - ZDefocusPro: Core DOF processing using pre-calculated CoC maps
 # - ZDefocusLegacy: Legacy all-in-one node for backward compatibility
@@ -211,12 +211,12 @@ def _apply_aperture_blur(img_any: torch.Tensor, radius_px: float,
 class ZDefocusAnalyzer:
     """
     Analyzes depth maps and calculates Circle of Confusion (CoC) values.
-    
+
     This node performs the depth-to-blur calculation without applying the actual blur,
     allowing users to experiment with focus settings and visualize the results before
     committing to the expensive blur operations.
     """
-    
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -255,10 +255,10 @@ class ZDefocusAnalyzer:
     ):
         """
         Analyze depth map and calculate Circle of Confusion values.
-        
+
         Returns:
             coc_map: Normalized CoC values (0=sharp, 1=max blur) as RGB image
-            in_focus_mask: Binary mask of sharp regions  
+            in_focus_mask: Binary mask of sharp regions
             near_mask: Binary mask of foreground regions
             effective_focus: The actual focus value used (for chaining)
         """
@@ -266,7 +266,7 @@ class ZDefocusAnalyzer:
         f_number = max(0.1, f_number)
         ref_f_number = max(0.1, ref_f_number)
         focus = max(0.0, min(1.0, focus))
-        
+
         # Process depth map
         d = _ensure_depth01(depth, invert=invert_depth)  # (B,1,H,W)
         d = _harden_depth(d, enable=harden_edges, levels=quantize_levels, pre_smooth_px=pre_smooth_px)
@@ -280,22 +280,22 @@ class ZDefocusAnalyzer:
         # Calculate focus weight and masks
         t = (dist / max(focal_width, 1e-6)).clamp(0, 1)
         focus_weight = _smoothstep01(t)
-        
+
         near_mask_tensor = (d < focus).float()
         far_mask_tensor = 1.0 - near_mask_tensor
         side_scale = near_mask_tensor * near_scale + far_mask_tensor * far_scale
-        
+
         if bg_only:
             side_scale = side_scale * far_mask_tensor
 
         # Calculate normalized Circle of Confusion
         coc_norm = (focus_weight * side_scale * f_scale_blur).clamp(0.0, 1.0)
-        
+
         # Convert to outputs
         coc_rgb = coc_norm.repeat(1, 3, 1, 1)  # Convert to RGB for visualization
         in_focus_mask = (t <= 0.5).float().squeeze(1)  # Binary mask of sharp regions
         near_mask = near_mask_tensor.squeeze(1)  # Binary mask of foreground
-        
+
         return (
             _to_bhwc_safe(coc_rgb),
             in_focus_mask,
@@ -307,12 +307,12 @@ class ZDefocusAnalyzer:
 class ZDefocusVisualizer:
     """
     Interactive depth visualization with focus point selection.
-    
+
     This node provides a comprehensive view of the depth map with color-coded regions
     showing where blur will be applied. Users can experiment with different focus
     values and see the results immediately without processing the full image.
     """
-    
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -346,7 +346,7 @@ class ZDefocusVisualizer:
     ):
         """
         Create depth visualization with focus indicators.
-        
+
         Returns:
             visualization: Original image with depth overlay
             depth_colored: Color-coded depth map
@@ -355,7 +355,7 @@ class ZDefocusVisualizer:
         # Normalize inputs
         img = _as_bchw(image).clamp(0.0, 1.0)
         d = _ensure_depth01(depth, invert=invert_depth)
-        
+
         # If CoC map is provided, use it; otherwise calculate basic focus regions
         if coc_map is not None:
             coc_rgb = _as_bchw(coc_map)
@@ -366,118 +366,118 @@ class ZDefocusVisualizer:
             focal_width = 0.02  # Default focal width
             t = (dist / focal_width).clamp(0, 1)
             coc_norm = _smoothstep01(t)
-        
+
         # Create color-coded depth visualization
         if colorize_depth:
             # Apply a color map to depth values
             depth_colored = self._apply_depth_colormap(d)
         else:
             depth_colored = d.repeat(1, 3, 1, 1)
-        
+
         # Create focus region overlay
         # Green: in-focus areas, Blue: near blur, Red: far blur
         near_mask = (d < focus).float()
         far_mask = 1.0 - near_mask
         in_focus = (coc_norm <= 0.1).float()  # Sharp regions
-        
+
         overlay = torch.zeros_like(img)
         overlay[:, 1:2, :, :] = in_focus           # Green: in-focus
         overlay[:, 2:3, :, :] = coc_norm * near_mask  # Blue: near blur
         overlay[:, 0:1, :, :] = coc_norm * far_mask   # Red: far blur
-        
+
         # Add focus point indicator
         if show_focus_point:
             overlay = self._add_focus_indicator(overlay, d, focus, focus_point_size)
-        
+
         # Blend with original image
         alpha = torch.tensor(overlay_opacity, device=img.device, dtype=img.dtype)
         visualization = (1 - alpha) * img + alpha * overlay
         visualization = visualization.clamp(0, 1)
-        
+
         # Focus region mask (binary)
         focus_region = (coc_norm <= 0.1).squeeze(1)
-        
+
         return (
             _to_bhwc_safe(visualization),
             _to_bhwc_safe(depth_colored),
             focus_region
         )
-    
+
     def _apply_depth_colormap(self, depth):
         """Apply a rainbow colormap to depth values for better visualization."""
         # Create HSV color mapping: depth -> hue
         d_flat = depth.squeeze(1)  # (B, H, W)
         hue = d_flat * 0.8  # Map to blue-red spectrum (0.8 * 2π)
-        
+
         # Convert HSV to RGB
         sat = torch.ones_like(hue)
         val = torch.ones_like(hue)
-        
+
         rgb = self._hsv_to_rgb(hue, sat, val)
         return rgb.unsqueeze(0) if rgb.dim() == 3 else rgb
-    
+
     def _hsv_to_rgb(self, h, s, v):
         """Convert HSV to RGB color space."""
         h = h * 6.0  # Scale hue to [0, 6]
         i = torch.floor(h).long()
         f = h - i.float()
-        
+
         p = v * (1.0 - s)
         q = v * (1.0 - s * f)
         t = v * (1.0 - s * (1.0 - f))
-        
+
         # Create RGB channels
         r = torch.zeros_like(v)
         g = torch.zeros_like(v)
         b = torch.zeros_like(v)
-        
+
         # Apply HSV to RGB conversion based on hue sector
         idx = (i % 6)
         r = torch.where(idx == 0, v, torch.where(idx == 1, q, torch.where(idx == 2, p, torch.where(idx == 3, p, torch.where(idx == 4, t, v)))))
         g = torch.where(idx == 0, t, torch.where(idx == 1, v, torch.where(idx == 2, v, torch.where(idx == 3, q, torch.where(idx == 4, p, p)))))
         b = torch.where(idx == 0, p, torch.where(idx == 1, p, torch.where(idx == 2, t, torch.where(idx == 3, v, torch.where(idx == 4, v, q)))))
-        
+
         return torch.stack([r, g, b], dim=1)
-    
+
     def _add_focus_indicator(self, overlay, depth, focus, size):
         """Add a crosshair or circle at the focus point."""
         B, C, H, W = overlay.shape
-        
+
         # Find pixel coordinates closest to focus value
         focus_mask = (depth.squeeze(1) - focus).abs()
         focus_y, focus_x = torch.where(focus_mask == focus_mask.min())
-        
+
         if len(focus_y) > 0:
             # Use first match if multiple pixels have same depth
             fy, fx = int(focus_y[0]), int(focus_x[0])
-            
+
             # Draw crosshair
             half_size = size // 2
             y_start = max(0, fy - half_size)
             y_end = min(H, fy + half_size + 1)
             x_start = max(0, fx - half_size)
             x_end = min(W, fx + half_size + 1)
-            
+
             # Draw horizontal line
             if y_start <= fy < y_end:
                 overlay[:, :, fy, x_start:x_end] = 1.0
-            
-            # Draw vertical line  
+
+            # Draw vertical line
             if x_start <= fx < x_end:
                 overlay[:, :, y_start:y_end, fx] = 1.0
-        
+
         return overlay
 
 
 class ZDefocusPro:
     """
     Core depth-of-field processing node.
-    
-    This streamlined version focuses purely on applying blur based on 
+
+    This streamlined version focuses purely on applying blur based on
     pre-calculated Circle of Confusion maps, allowing for faster iteration
     and more modular workflows.
     """
-    
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -509,57 +509,57 @@ class ZDefocusPro:
     ):
         """
         Apply depth-of-field blur using pre-calculated Circle of Confusion map.
-        
+
         Args:
             image: Input image to blur
             coc_map: Normalized CoC values from ZDefocusAnalyzer (0=sharp, 1=max blur)
             max_blur_px: Maximum blur radius in pixels
-            
+
         Returns:
             Blurred image with realistic depth-of-field effect
         """
         if max_blur_px <= 0:
             return (_to_bhwc_safe(image),)
-        
+
         # Normalize inputs
         img = _as_bchw(image).clamp(0.0, 1.0)
         coc_rgb = _as_bchw(coc_map)
-        
+
         # Extract CoC intensity (use red channel or convert to grayscale)
         if coc_rgb.size(1) >= 3:
             coc_norm = (coc_rgb[:, 0:1] + coc_rgb[:, 1:2] + coc_rgb[:, 2:3]) / 3.0
         else:
             coc_norm = coc_rgb[:, 0:1]
-        
+
         coc_norm = coc_norm.clamp(0.0, 1.0)
         coc_px = (coc_norm * max_blur_px).clamp(0.0, max_blur_px)
-        
+
         # Create blur stack
         levels = max(3, int(num_levels))
         radii = torch.linspace(0.0, max_blur_px, levels, device=img.device)
-        
+
         # Build blur pyramid
         blurred = [img]  # Level 0: no blur
         for i, r in enumerate(radii[1:], 1):
             blur_radius = float(r.item())
             blurred_level = _apply_aperture_blur(
                 img, blur_radius,
-                bokeh_shape=bokeh_shape, 
-                blades=blades, 
+                bokeh_shape=bokeh_shape,
+                blades=blades,
                 rotation_deg=rotation_deg
             )
             blurred.append(blurred_level)
-        
+
         stack = torch.stack(blurred, dim=0)  # (L,B,3,H,W)
         del blurred
-        
+
         # Blend between blur levels
         idx_f = (coc_px / max(max_blur_px, 1e-6)) * (levels - 1)
         idx0 = idx_f.floor().clamp(0, levels - 1)
         idx1 = (idx0 + 1).clamp(0, levels - 1)
         w1 = (idx_f - idx0).unsqueeze(1)
         w0 = 1.0 - w1
-        
+
         def gather_level(level_idx):
             L = stack.shape[0]
             li = level_idx.long().clamp(0, L - 1)
@@ -569,11 +569,11 @@ class ZDefocusPro:
                 if mask.any():
                     out = out + stack[l] * mask
             return out
-        
+
         out0 = gather_level(idx0)
         out1 = gather_level(idx1)
         out = out0 * w0 + out1 * w1
-        
+
         # Highlight preservation
         if preserve_highlights:
             ref_blur_radius = max(1.0, max_blur_px * 0.25)
@@ -581,11 +581,11 @@ class ZDefocusPro:
                                        bokeh_shape=bokeh_shape, blades=blades, rotation_deg=rotation_deg)
             base = _apply_aperture_blur(out, ref_blur_radius,
                                         bokeh_shape=bokeh_shape, blades=blades, rotation_deg=rotation_deg)
-            
+
             eps = 1e-6
             gain = (ref + eps) / (base + eps)
             out = out * gain.clamp(0.5, 2.0)
-        
+
         out = out.clamp(0.0, 1.0)
         return (_to_bhwc_safe(out),)
 
@@ -595,11 +595,11 @@ class ZDefocusPro:
 class ZDefocusLegacy:
     """
     Legacy all-in-one Z-Defocus Pro node for backward compatibility.
-    
+
     This node preserves the original functionality and workflow for existing users
     while the new modular nodes provide enhanced flexibility for new workflows.
     """
-    
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -651,7 +651,7 @@ class ZDefocusLegacy:
     ):
         """
         Legacy all-in-one depth of field processing.
-        
+
         This method combines all functionality from the modular nodes into a single
         processing pipeline, maintaining compatibility with existing workflows.
         """
@@ -668,7 +668,7 @@ class ZDefocusLegacy:
         ref_f_number = max(0.1, ref_f_number)
         focus = max(0.0, min(1.0, focus))
         num_levels = max(3, min(32, num_levels))  # Reasonable memory limit
-        
+
         # Normalize inputs with error handling
         try:
             img = _as_bchw(image).clamp(0.0, 1.0)           # (B,3,H,W)

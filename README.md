@@ -7,7 +7,7 @@ Advanced depth-of-field simulation for ComfyUI with realistic camera optics mode
 ### Core Capabilities
 - **Physically-based aperture calculations** with f-number support
 - **Multiple bokeh shapes**: disc, polygon (hex, square, triangle, octagon), custom blade count
-- **Edge hardening** for crisp depth transitions  
+- **Edge hardening** for crisp depth transitions
 - **Highlight preservation** to prevent blown-out bokeh
 - **Robust tensor handling** (BHWC/BCHW/LBCHW support)
 - **Performance optimized** with blur stack pre-computation
@@ -16,7 +16,7 @@ Advanced depth-of-field simulation for ComfyUI with realistic camera optics mode
 The package provides specialized nodes for maximum flexibility:
 
 1. **Z-Defocus Analyzer** - Converts depth maps to Circle of Confusion (CoC) maps
-2. **Z-Defocus Visualizer** - Interactive depth preview with focus point selection  
+2. **Z-Defocus Visualizer** - Interactive depth preview with focus point selection
 3. **Z-Defocus Pro** - Streamlined DOF processing using pre-calculated CoC
 4. **Z-Defocus Legacy** - Original all-in-one node for backward compatibility
 
@@ -37,13 +37,13 @@ Analyzes depth maps and calculates blur intensity without applying actual blur.
 - `near_mask` - Binary mask of foreground objects
 - `effective_focus` - Processed focus value (for chaining)
 
-### Z-Defocus Visualizer  
+### Z-Defocus Visualizer
 Provides interactive depth visualization with color-coded focus regions.
 
 **Inputs:**
 - `image` - Source image for overlay
 - `depth` - Depth map
-- `focus` - Focus distance  
+- `focus` - Focus distance
 - `coc_map` (optional) - Pre-calculated CoC from Analyzer
 - `overlay_opacity` - Visualization blend strength
 - `show_focus_point` - Display focus crosshair
@@ -80,11 +80,11 @@ Complete all-in-one node preserving the original workflow for backward compatibi
 Image → Z-Defocus Visualizer ← Depth Map
          ↓ (preview and adjust focus)
 Image → Z-Defocus Analyzer ← Depth Map
-         ↓ (coc_map output)  
+         ↓ (coc_map output)
 Image → Z-Defocus Pro → Final DOF Image
 ```
 
-### Advanced Multi-Variation Workflow  
+### Advanced Multi-Variation Workflow
 ```
 Depth Map → Z-Defocus Analyzer (focus=0.3) → CoC Map A
          → Z-Defocus Analyzer (focus=0.7) → CoC Map B
@@ -109,7 +109,7 @@ Image + Depth Map → Z-Defocus Legacy → DOF Image + Visualizer
 ### Bokeh Shapes
 - **gauss**: Smooth Gaussian blur (perfect lens)
 - **disc**: Circular aperture (most common)
-- **hex/square/tri/oct**: Polygonal apertures  
+- **hex/square/tri/oct**: Polygonal apertures
 - **poly**: Custom polygon with specified blade count
 
 ### Advanced Features
@@ -127,7 +127,7 @@ git clone https://github.com/nicolabergamaschi/ComfyUI-ZDefocus-pro.git
 
 2. Install dependencies:
 ```bash
-cd ComfyUI-ZDefocus-pro  
+cd ComfyUI-ZDefocus-pro
 pip install -r requirements.txt
 ```
 
@@ -141,7 +141,7 @@ The nodes will appear under **My Nodes/DOF** in the node browser.
 - **No changes required**: Your existing workflows will continue to work using the "Z-Defocus Legacy" node
 - **Optional upgrade**: Gradually migrate to modular nodes for enhanced flexibility
 
-### For New Users  
+### For New Users
 - **Start with modular workflow**: Use Analyzer → Visualizer → Pro for maximum control
 - **Quick start**: Use Legacy node if you prefer the original all-in-one approach
 
@@ -157,7 +157,7 @@ The nodes will appear under **My Nodes/DOF** in the node browser.
 - Green overlay shows sharp regions, blue/red show blur areas
 - Adjust `base_focal_width` to control focus region size
 
-### Performance Tuning  
+### Performance Tuning
 - Lower `num_levels` for faster processing (3-5 levels usually sufficient)
 - Reduce `max_blur_px` if extreme blur isn't needed
 - Use simpler bokeh shapes (gauss, disc) for speed
@@ -172,7 +172,7 @@ The nodes will appear under **My Nodes/DOF** in the node browser.
 ### Single-File Design
 All functionality is contained in `zdefocus_nodes.py` with no external dependencies within the package:
 - **Shared utilities**: Common functions used across all nodes
-- **Modular nodes**: Specialized components for flexible workflows  
+- **Modular nodes**: Specialized components for flexible workflows
 - **Legacy node**: Complete backward-compatible implementation
 
 ### Memory Optimization

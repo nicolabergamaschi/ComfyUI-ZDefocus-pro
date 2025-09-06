@@ -46,7 +46,7 @@ Create multiple DOF variations from the same depth map:
 
 ```
 LoadImage (depth) → Z-Defocus Analyzer (focus=0.2) → CoC Map A
-                 → Z-Defocus Analyzer (focus=0.5) → CoC Map B  
+                 → Z-Defocus Analyzer (focus=0.5) → CoC Map B
                  → Z-Defocus Analyzer (focus=0.8) → CoC Map C
 
 LoadImage (image) → Z-Defocus Pro (Modular) ← CoC Map A → Foreground Focus
@@ -67,7 +67,7 @@ Perfect your depth of field through iteration:
 LoadImage (depth) → Z-Defocus Visualizer ← LoadImage (image)
                          ↓ (preview)
                     Z-Defocus Analyzer
-                         ↓ (coc_map) 
+                         ↓ (coc_map)
                     Z-Defocus Pro (Modular) ← LoadImage (image)
                          ↓
                     PreviewImage (check result)
