@@ -445,11 +445,19 @@ class ZDefocusVisualizer:
 
         # Find pixel coordinates closest to focus value
         focus_mask = (depth.squeeze(1) - focus).abs()
-        focus_y, focus_x = torch.where(focus_mask == focus_mask.min())
 
-        if len(focus_y) > 0:
+        # For batched tensors, torch.where returns (batch_idx, y_idx, x_idx)
+        indices = torch.where(focus_mask == focus_mask.min())
+
+        if len(indices) >= 2 and len(indices[0]) > 0:
             # Use first match if multiple pixels have same depth
-            fy, fx = int(focus_y[0]), int(focus_x[0])
+            # For batched input: indices = (batch_indices, y_indices, x_indices)
+            if len(indices) == 3:  # Batched case
+                batch_idx, focus_y, focus_x = indices
+                fy, fx = int(focus_y[0]), int(focus_x[0])
+            else:  # Non-batched case
+                focus_y, focus_x = indices
+                fy, fx = int(focus_y[0]), int(focus_x[0])
 
             # Draw crosshair
             half_size = size // 2
