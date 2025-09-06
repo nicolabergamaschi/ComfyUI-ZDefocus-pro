@@ -1,55 +1,185 @@
-# Z-Defocus Pro (Aperture + Visualise) for ComfyUI
+# ComfyUI Z-Defocus Pro
 
-Depth-based defocus node with:
-- **Aperture control (f-number)** for realistic DoF behavior.
-- **Visualiser overlay** (green=in focus, blue=near blur, red=far blur).
-- **CoC grayscale** and **in-focus mask** outputs.
-- **Depth edge hardening** (quantizes depth to plateaus, killing AA/gradients at object edges).
+Advanced depth-of-field simulation for ComfyUI with realistic camera optics modeling and modular workflow design.
 
-## Install
+## Features
 
-Copy this folder to:
+### Core Capabilities
+- **Physically-based aperture calculations** with f-number support
+- **Multiple bokeh shapes**: disc, polygon (hex, square, triangle, octagon), custom blade count
+- **Edge hardening** for crisp depth transitions  
+- **Highlight preservation** to prevent blown-out bokeh
+- **Robust tensor handling** (BHWC/BCHW/LBCHW support)
+- **Performance optimized** with blur stack pre-computation
 
-ComfyUI/custom_nodes/comfyui-zdefocus-pro
+### Modular Workflow Design
+The package provides specialized nodes for maximum flexibility:
 
-Restart ComfyUI (or use ComfyUI-Manager → Reload Custom Nodes).
+1. **Z-Defocus Analyzer** - Converts depth maps to Circle of Confusion (CoC) maps
+2. **Z-Defocus Visualizer** - Interactive depth preview with focus point selection  
+3. **Z-Defocus Pro** - Streamlined DOF processing using pre-calculated CoC
+4. **Z-Defocus Legacy** - Original all-in-one node for backward compatibility
 
-## Inputs
+## Node Reference
 
-- **image**: RGB IMAGE [0..1].
-- **depth**: depth map [0..1] (0=near, 1=far). Use `invert_depth` if reversed.
-- **focus**: depth value in focus (sample from your depth map).
-- **f_number**: e.g., 1.4–22. Lower f ⇒ shallower DoF, higher f ⇒ deeper DoF.
-- **max_blur_px**: max blur radius in pixels.
+### Z-Defocus Analyzer
+Analyzes depth maps and calculates blur intensity without applying actual blur.
 
-### Optional controls
-- `ref_f_number` (default 2.8): baseline for aperture scaling.
-- `base_focal_width` (default 0.02): soft band width (depth units) at `ref_f_number`.
-- `near_scale` / `far_scale`: bias blur near/far sides of focus.
-- `invert_depth`, `bg_only`, `preserve_highlights`
-- `num_levels` (3–8): preblur levels for multiscale blending (quality vs speed).
-- `overlay_opacity`: visualiser strength.
-- **Edge hardening**:
-  - `harden_edges` (on/off)
-  - `quantize_levels` (2–256): fewer = harder plateaus
-  - `pre_smooth_px` (0–3): tiny depth blur before quantize to stabilise bins
+**Inputs:**
+- `depth` - Depth map (IMAGE)
+- `focus` - Focus distance (0.0-1.0)
+- `f_number` - Camera aperture (1.0-22.0)
+- `max_blur_px` - Maximum blur radius in pixels
 
-## Outputs
+**Outputs:**
+- `coc_map` - Circle of Confusion intensity map
+- `in_focus_mask` - Binary mask of sharp regions
+- `near_mask` - Binary mask of foreground objects
+- `effective_focus` - Processed focus value (for chaining)
 
-1. **image**: defocused result (IMAGE).
-2. **visualiser**: overlay (IMAGE).
-3. **coc_gray**: grayscale CoC as IMAGE (3-ch).
-4. **in_focus_mask**: MASK (B,H,W) in [0,1].
+### Z-Defocus Visualizer  
+Provides interactive depth visualization with color-coded focus regions.
 
-## Tips
+**Inputs:**
+- `image` - Source image for overlay
+- `depth` - Depth map
+- `focus` - Focus distance  
+- `coc_map` (optional) - Pre-calculated CoC from Analyzer
+- `overlay_opacity` - Visualization blend strength
+- `show_focus_point` - Display focus crosshair
+- `colorize_depth` - Apply rainbow depth coloring
 
-- Start with `f_number = 2.8`, `base_focal_width = 0.02`, `max_blur_px = 16`.
-- Toggle **invert_depth** if blur looks inverted.
-- If you see halos at depth edges, increase `base_focal_width` slightly or reduce `max_blur_px`.
-- If AA gradients in depth cause bleeding, enable **harden_edges** and try `quantize_levels = 16–32`.
+**Outputs:**
+- `visualization` - Image with depth overlay (Green=focus, Blue=near, Red=far)
+- `depth_colored` - Color-mapped depth visualization
+- `focus_region` - Binary mask of focused areas
 
-## Notes
+### Z-Defocus Pro
+Streamlined DOF processing using pre-calculated CoC maps.
 
-This node uses a fast multiscale blend of pre-blurred images.
-For shaped bokeh and occlusion-aware edges, consider an "accurate" mode (disc kernel + occlusion)
-— can be added in a future update.
+**Inputs:**
+- `image` - Source image to blur
+- `coc_map` - CoC intensity from Analyzer
+- `max_blur_px` - Maximum blur radius
+- `bokeh_shape` - Aperture shape (gauss, disc, hex, square, tri, oct, poly)
+- `preserve_highlights` - Maintain bright region intensity
+
+**Outputs:**
+- `image` - Final depth-of-field result
+
+### Z-Defocus Legacy
+Complete all-in-one node preserving the original workflow for backward compatibility.
+
+**Inputs:** All parameters from the original implementation
+**Outputs:** `image`, `visualiser`, `coc_gray`, `in_focus_mask`
+
+## Workflow Examples
+
+### Basic Modular Workflow
+```
+Image → Z-Defocus Visualizer ← Depth Map
+         ↓ (preview and adjust focus)
+Image → Z-Defocus Analyzer ← Depth Map
+         ↓ (coc_map output)  
+Image → Z-Defocus Pro → Final DOF Image
+```
+
+### Advanced Multi-Variation Workflow  
+```
+Depth Map → Z-Defocus Analyzer (focus=0.3) → CoC Map A
+         → Z-Defocus Analyzer (focus=0.7) → CoC Map B
+
+Image → Z-Defocus Pro ← CoC Map A → Result A
+      → Z-Defocus Pro ← CoC Map B → Result B
+```
+
+### Legacy Workflow
+For existing users, the original workflow is preserved:
+```
+Image + Depth Map → Z-Defocus Legacy → DOF Image + Visualizer
+```
+
+## Camera Optics Simulation
+
+### Aperture Control
+- **f_number**: Controls depth of field width (lower = shallower DOF)
+- **ref_f_number**: Reference aperture for blur scaling
+- **base_focal_width**: Focus region size multiplier
+
+### Bokeh Shapes
+- **gauss**: Smooth Gaussian blur (perfect lens)
+- **disc**: Circular aperture (most common)
+- **hex/square/tri/oct**: Polygonal apertures  
+- **poly**: Custom polygon with specified blade count
+
+### Advanced Features
+- **Edge hardening**: Quantizes depth for sharper transitions
+- **Highlight preservation**: Maintains bright region intensity in bokeh
+- **Asymmetric scaling**: Different blur for foreground vs background
+
+## Installation
+
+1. Clone into your ComfyUI custom nodes directory:
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/nicolabergamaschi/ComfyUI-ZDefocus-pro.git
+```
+
+2. Install dependencies:
+```bash
+cd ComfyUI-ZDefocus-pro  
+pip install -r requirements.txt
+```
+
+3. Restart ComfyUI
+
+The nodes will appear under **My Nodes/DOF** in the node browser.
+
+## Migration Guide
+
+### For Existing Users
+- **No changes required**: Your existing workflows will continue to work using the "Z-Defocus Legacy" node
+- **Optional upgrade**: Gradually migrate to modular nodes for enhanced flexibility
+
+### For New Users  
+- **Start with modular workflow**: Use Analyzer → Visualizer → Pro for maximum control
+- **Quick start**: Use Legacy node if you prefer the original all-in-one approach
+
+## Performance & Quality Tips
+
+### Depth Map Quality
+- Use high-quality depth estimation (DepthAnything, Marigold, etc.)
+- Consider depth map preprocessing (smoothing, edge enhancement)
+- Test different depth inversion settings for your source
+
+### Focus Selection
+- Use the Visualizer to experiment with focus points before processing
+- Green overlay shows sharp regions, blue/red show blur areas
+- Adjust `base_focal_width` to control focus region size
+
+### Performance Tuning  
+- Lower `num_levels` for faster processing (3-5 levels usually sufficient)
+- Reduce `max_blur_px` if extreme blur isn't needed
+- Use simpler bokeh shapes (gauss, disc) for speed
+
+### Artistic Control
+- Try asymmetric near/far scaling for stylistic effects
+- Experiment with different bokeh shapes for unique looks
+- Use highlight preservation for realistic bright region handling
+
+## Technical Architecture
+
+### Single-File Design
+All functionality is contained in `zdefocus_nodes.py` with no external dependencies within the package:
+- **Shared utilities**: Common functions used across all nodes
+- **Modular nodes**: Specialized components for flexible workflows  
+- **Legacy node**: Complete backward-compatible implementation
+
+### Memory Optimization
+- **Blur stack approach**: Pre-computes all blur levels for smooth blending
+- **Efficient tensor handling**: Careful management to minimize peak memory usage
+- **Format flexibility**: Automatic handling of BHWC/BCHW/LBCHW inputs
+
+## License
+
+This project is open source. Feel free to modify and redistribute according to your needs.
