@@ -9,7 +9,20 @@
 #
 # This modular approach allows users to:
 # 1. Visualize depth and experiment with focus points before processing
-# 2. Reuse analysis results across multiple DOF variations
+# 2. Reuse analysis result                # GPU-optimized blur stack creation with memory management
+        levels = max(3, min(int(num_levels), 12))  # Limit levels to prevent memory issues
+
+        # Memory optimization: process large images in smaller chunks if needed
+        B, C, H, W = img.shape
+        total_pixels = B * C * H * W
+        memory_limit = 2e8  # ~800MB limit for blur stack
+
+        if total_pixels * levels > memory_limit:
+            # Use progressive processing for large images
+            result = self._progressive_blur(img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg)
+        else:
+            # Standard processing for smaller images
+            result = self._standard_blur(img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg)F variations
 # 3. Build more complex depth-based workflows
 
 import math
@@ -117,6 +130,9 @@ def _harden_depth(d: torch.Tensor, enable: bool, levels: int, pre_smooth_px: flo
     return dq.clamp(0, 1)
 
 # ---------- Bokeh kernels ----------
+# Cache kernels on GPU to avoid repeated CPU->GPU transfers
+_gpu_kernel_cache = {}
+
 @functools.lru_cache(maxsize=256)
 def _disc_kernel(radius: int) -> torch.Tensor:
     if radius < 1:
@@ -161,10 +177,26 @@ def _polygon_kernel(radius: int, sides: int, rotation_deg: float) -> torch.Tenso
     ker /= ker.sum().clamp(min=1.0)
     return ker.unsqueeze(0).unsqueeze(0)
 
+def _get_gpu_kernel(radius: int, shape: str, sides: int, rotation_deg: float, device: torch.device, dtype: torch.dtype):
+    """Get cached GPU kernel to avoid repeated transfers."""
+    cache_key = (radius, shape, sides, rotation_deg, device, dtype)
+
+    if cache_key not in _gpu_kernel_cache:
+        if shape == "disc":
+            ker = _disc_kernel(radius)
+        else:
+            ker = _polygon_kernel(radius, sides, rotation_deg)
+
+        # Transfer to GPU and cache
+        _gpu_kernel_cache[cache_key] = ker.to(device=device, dtype=dtype)
+
+    return _gpu_kernel_cache[cache_key]
+
 def _apply_aperture_blur(img_any: torch.Tensor, radius_px: float,
                          bokeh_shape: str, blades: int, rotation_deg: float) -> torch.Tensor:
     """
     Apply aperture-shaped blur to simulate camera bokeh effects.
+    Optimized for GPU performance with memory-efficient processing.
 
     This function creates realistic camera blur by using different aperture shapes:
     - 'gauss': Smooth Gaussian blur (typical for perfect lenses)
@@ -187,24 +219,48 @@ def _apply_aperture_blur(img_any: torch.Tensor, radius_px: float,
     if radius_px <= 0:
         return img_bchw
 
+    # GPU optimization: use half precision for large blur kernels to save memory
+    use_half = radius_px > 32 and img_bchw.dtype == torch.float32
+    if use_half:
+        original_dtype = img_bchw.dtype
+        img_bchw = img_bchw.half()
+
     if bokeh_shape == "gauss":
-        return _gauss_blur_like(img_bchw, radius_px)
-
-    r = int(max(1, round(radius_px)))
-    if bokeh_shape == "disc":
-        ker = _disc_kernel(r)
-    elif bokeh_shape in ("hex", "square", "tri", "oct"):
-        ker = _polygon_kernel(r, {"tri": 3, "square": 4, "hex": 6, "oct": 8}[bokeh_shape], rotation_deg)
-    elif bokeh_shape == "poly":
-        ker = _polygon_kernel(r, blades, rotation_deg)
+        result = _gauss_blur_like(img_bchw, radius_px)
     else:
-        return _gauss_blur_like(img_bchw, radius_px)
+        r = int(max(1, round(radius_px)))
 
-    ker = ker.to(device=img_bchw.device, dtype=img_bchw.dtype)
-    B, C, H, W = img_bchw.shape
-    ker_c = ker.repeat(C, 1, 1, 1)  # (C,1,k,k)
-    pad = r
-    return torch.conv2d(img_bchw, ker_c, bias=None, stride=1, padding=pad, groups=C)
+        # Memory optimization: limit kernel size for very large radii
+        max_kernel_size = 128  # Reasonable limit for GPU memory
+        if r > max_kernel_size:
+            # Use separable approximation for very large blur
+            result = _gauss_blur_like(img_bchw, radius_px)
+        else:
+            if bokeh_shape == "disc":
+                ker = _get_gpu_kernel(r, "disc", 6, 0.0, img_bchw.device, img_bchw.dtype)
+            elif bokeh_shape in ("hex", "square", "tri", "oct"):
+                sides = {"tri": 3, "square": 4, "hex": 6, "oct": 8}[bokeh_shape]
+                ker = _get_gpu_kernel(r, "poly", sides, rotation_deg, img_bchw.device, img_bchw.dtype)
+            elif bokeh_shape == "poly":
+                ker = _get_gpu_kernel(r, "poly", blades, rotation_deg, img_bchw.device, img_bchw.dtype)
+            else:
+                result = _gauss_blur_like(img_bchw, radius_px)
+                if use_half:
+                    result = result.to(original_dtype)
+                return result
+
+            B, C, H, W = img_bchw.shape
+            ker_c = ker.repeat(C, 1, 1, 1)  # (C,1,k,k)
+            pad = r
+
+            # GPU optimization: use groups convolution for efficiency
+            result = torch.conv2d(img_bchw, ker_c, bias=None, stride=1, padding=pad, groups=C)
+
+    # Convert back to original precision if needed
+    if use_half:
+        result = result.to(original_dtype)
+
+    return result
 
 # ========== MODULAR NODES ==========
 
@@ -227,10 +283,15 @@ class ZDefocusAnalyzer:
                 "max_blur_px": ("FLOAT", {"default": 16.0, "min": 0.0, "max": 128.0, "step": 0.5}),
             },
             "optional": {
-                "ref_f_number": ("FLOAT", {"default": 2.8, "min": 1.0, "max": 22.0, "step": 0.1}),
+                # Focus Control (key parameters for focus region width)
                 "base_focal_width": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 0.25, "step": 0.001}),
+                "ref_f_number": ("FLOAT", {"default": 2.8, "min": 1.0, "max": 22.0, "step": 0.1}),
+
+                # Blur Scaling
                 "near_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "far_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+
+                # Depth Processing
                 "invert_depth": ("BOOLEAN", {"default": False}),
                 "bg_only": ("BOOLEAN", {"default": False}),
                 "harden_edges": ("BOOLEAN", {"default": True}),
@@ -597,6 +658,114 @@ class ZDefocusPro:
         out = out.clamp(0.0, 1.0)
         return (_to_bhwc_safe(out),)
 
+    def _standard_blur(self, img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg):
+        """Standard blur processing for smaller images."""
+        radii = torch.linspace(0.0, max_blur_px, levels, device=img.device)
+
+        # Build blur pyramid efficiently
+        blurred = [img]  # Level 0: no blur
+        for i, r in enumerate(radii[1:], 1):
+            blur_radius = float(r.item())
+            blurred_level = _apply_aperture_blur(
+                img, blur_radius,
+                bokeh_shape=bokeh_shape,
+                blades=blades,
+                rotation_deg=rotation_deg
+            )
+            blurred.append(blurred_level)
+
+        stack = torch.stack(blurred, dim=0)  # (L,B,3,H,W)
+        del blurred
+
+        return self._blend_blur_levels(img, stack, coc_px, max_blur_px, levels)
+
+    def _progressive_blur(self, img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg):
+        """Memory-efficient progressive blur processing for large images."""
+        # Direct interpolation approach without storing full blur stack
+        radii = torch.linspace(0.0, max_blur_px, levels, device=img.device)
+
+        # Calculate which blur levels each pixel needs
+        idx_f = (coc_px / max(max_blur_px, 1e-6)) * (levels - 1)
+        idx0 = idx_f.floor().clamp(0, levels - 1)
+        idx1 = (idx0 + 1).clamp(0, levels - 1)
+        w1 = (idx_f - idx0)
+        w0 = 1.0 - w1
+
+        # Process blur levels on-demand
+        unique_levels = torch.unique(torch.cat([idx0.flatten(), idx1.flatten()]))
+        blur_cache = {}
+
+        for level in unique_levels:
+            level_int = int(level.item())
+            if level_int == 0:
+                blur_cache[level_int] = img
+            else:
+                blur_radius = float(radii[level_int].item())
+                blur_cache[level_int] = _apply_aperture_blur(
+                    img, blur_radius, bokeh_shape, blades, rotation_deg
+                )
+
+        # Blend results
+        B, C, H, W = img.shape
+        out = torch.zeros_like(img)
+
+        # Accumulate contributions from each blur level
+        for level in unique_levels:
+            level_int = int(level.item())
+            level_tensor = torch.tensor(level_int, device=img.device)
+
+            # Masks for this level
+            mask0 = (idx0 == level_tensor).float()
+            mask1 = (idx1 == level_tensor).float()
+
+            if mask0.any():
+                contribution = blur_cache[level_int] * w0.unsqueeze(1) * mask0.unsqueeze(1)
+                out = out + contribution
+
+            if mask1.any():
+                contribution = blur_cache[level_int] * w1.unsqueeze(1) * mask1.unsqueeze(1)
+                out = out + contribution
+
+        return out
+
+    def _blend_blur_levels(self, img, stack, coc_px, max_blur_px, levels):
+        """Optimized GPU-based smooth blending between blur levels."""
+        # Use continuous interpolation instead of discrete level selection
+        idx_f = (coc_px / max(max_blur_px, 1e-6)) * (levels - 1)
+        idx0 = idx_f.floor().clamp(0, levels - 1)
+        idx1 = (idx0 + 1).clamp(0, levels - 1)
+        w1 = (idx_f - idx0)
+        w0 = 1.0 - w1
+
+        # Efficient GPU-native interpolation using advanced indexing
+        B, C, H, W = img.shape
+        L = stack.shape[0]
+
+        # Reshape for efficient indexing: (L,B,C,H,W) -> (L,BCHW)
+        stack_reshaped = stack.view(L, B * C * H * W)
+
+        # Create linear indices for each pixel position
+        pixel_indices = torch.arange(B * C * H * W, device=img.device, dtype=torch.long)
+
+        # Expand indices for gathering from blur levels
+        idx0_expanded = idx0.view(-1).long()  # (BCHW,)
+        idx1_expanded = idx1.view(-1).long()  # (BCHW,)
+
+        # Advanced indexing for smooth GPU-based gathering
+        out0_flat = stack_reshaped[idx0_expanded, pixel_indices]
+        out1_flat = stack_reshaped[idx1_expanded, pixel_indices]
+
+        # Reshape back to image dimensions
+        out0 = out0_flat.view(B, C, H, W)
+        out1 = out1_flat.view(B, C, H, W)
+
+        # Smooth interpolation with proper broadcasting
+        w0_expanded = w0.unsqueeze(1).expand_as(out0)
+        w1_expanded = w1.unsqueeze(1).expand_as(out1)
+        out = out0 * w0_expanded + out1 * w1_expanded
+
+        return out
+
 
 # ========== LEGACY ALL-IN-ONE NODE ==========
 
@@ -709,55 +878,71 @@ class ZDefocusLegacy:
         coc_norm = (focus_weight * side_scale * f_scale_blur).clamp(0.0, 1.0)
         coc_px   = (coc_norm * max_blur_px).clamp(0.0, max_blur_px)
 
-        # Pre-blurred stack (L,B,3,H,W) - creates a pyramid of progressively blurred images
-        # This approach trades memory for speed by pre-computing all blur levels
-        levels = max(3, int(num_levels))
-        radii = torch.linspace(0.0, max_blur_px, levels, device=img.device)
+        # GPU-optimized blur stack creation with memory management
+        # This approach balances memory usage with processing speed
+        levels = max(3, min(int(num_levels), 12))  # Limit levels to prevent memory issues
 
-        # Memory-conscious stacking - build list first, then stack to minimize peak memory
-        blurred = []
-        blurred.append(img)  # Level 0: no blur
+        # Memory optimization: check if we need progressive processing for large images
+        B, C, H, W = img.shape
+        total_pixels = B * C * H * W
+        memory_limit = 2e8  # ~800MB limit for blur stack
 
-        for i, r in enumerate(radii[1:], 1):
-            blur_radius = float(r.item())
-            blurred_level = _apply_aperture_blur(img, blur_radius,
-                                               bokeh_shape=bokeh_shape, blades=blades, rotation_deg=rotation_deg)
-            blurred.append(blurred_level)
+        if total_pixels * levels > memory_limit:
+            # Use memory-efficient approach for large images
+            out = self._progressive_blur_legacy(img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg)
+        else:
+            # Standard processing for manageable image sizes
+            radii = torch.linspace(0.0, max_blur_px, levels, device=img.device)
 
-        # Stack all blur levels - this is the memory-intensive step
-        stack = torch.stack(blurred, dim=0)  # (L,B,3,H,W)
+            # Memory-conscious stacking - build list first, then stack to minimize peak memory
+            blurred = []
+            blurred.append(img)  # Level 0: no blur
 
-        # Clear the list to free intermediate memory
-        del blurred
+            for i, r in enumerate(radii[1:], 1):
+                blur_radius = float(r.item())
+                blurred_level = _apply_aperture_blur(img, blur_radius,
+                                                   bokeh_shape=bokeh_shape, blades=blades, rotation_deg=rotation_deg)
+                blurred.append(blurred_level)
 
-        # Blend between nearest blur levels using bilinear interpolation
-        # This creates smooth depth-of-field transitions by mixing adjacent blur levels
-        idx_f = (coc_px / max(max_blur_px, 1e-6)) * (levels - 1)  # Continuous index into blur stack
-        idx0 = idx_f.floor().clamp(0, levels - 1)  # Lower blur level index
-        idx1 = (idx0 + 1).clamp(0, levels - 1)     # Upper blur level index
-        w1 = (idx_f - idx0).unsqueeze(1)           # Interpolation weight for upper level
-        w0 = 1.0 - w1                              # Interpolation weight for lower level
+            # Stack all blur levels - this is the memory-intensive step
+            stack = torch.stack(blurred, dim=0)  # (L,B,3,H,W)
 
-        def gather_level(level_idx):
-            """
-            Efficiently gather pixels from the blur stack based on per-pixel level indices.
-            This avoids expensive indexing operations by iterating through levels and
-            accumulating contributions where each pixel belongs to that level.
-            """
+            # Clear the list to free intermediate memory
+            del blurred
+
+            # Optimized GPU-based smooth blending between blur levels
+            # Use continuous interpolation instead of discrete level selection for smoother transitions
+            idx_f = (coc_px / max(max_blur_px, 1e-6)) * (levels - 1)  # Continuous index into blur stack
+            idx0 = idx_f.floor().clamp(0, levels - 1)  # Lower blur level index
+            idx1 = (idx0 + 1).clamp(0, levels - 1)     # Upper blur level index
+            w1 = (idx_f - idx0)                        # Interpolation weight for upper level (no unsqueeze needed)
+            w0 = 1.0 - w1                              # Interpolation weight for lower level
+
+            # Efficient GPU-native interpolation using vectorized operations
             L = stack.shape[0]
-            li = level_idx.long().clamp(0, L - 1)
-            out = torch.zeros_like(img)
 
-            # Accumulate contributions from each blur level
-            for l in range(L):
-                mask = (li == l).float()  # Binary mask for pixels using this blur level
-                if mask.any():
-                    out = out + stack[l] * mask
-            return out
+            # Reshape for efficient indexing: (L,B,C,H,W) -> (L,BCHW)
+            stack_reshaped = stack.view(L, B * C * H * W)
 
-        out0 = gather_level(idx0)
-        out1 = gather_level(idx1)
-        out = out0 * w0 + out1 * w1
+            # Create linear indices for each pixel position
+            pixel_indices = torch.arange(B * C * H * W, device=img.device, dtype=torch.long)
+
+            # Expand indices for gathering from blur levels
+            idx0_expanded = idx0.view(-1).long()  # (BCHW,)
+            idx1_expanded = idx1.view(-1).long()  # (BCHW,)
+
+            # Advanced indexing for smooth GPU-based gathering
+            out0_flat = stack_reshaped[idx0_expanded, pixel_indices]  # (BCHW,)
+            out1_flat = stack_reshaped[idx1_expanded, pixel_indices]  # (BCHW,)
+
+            # Reshape back to image dimensions
+            out0 = out0_flat.view(B, C, H, W)
+            out1 = out1_flat.view(B, C, H, W)
+
+            # Smooth interpolation with proper broadcasting
+            w0_expanded = w0.unsqueeze(1).expand_as(out0)  # Broadcast to (B,C,H,W)
+            w1_expanded = w1.unsqueeze(1).expand_as(out1)  # Broadcast to (B,C,H,W)
+            out = out0 * w0_expanded + out1 * w1_expanded
 
         # Highlight preservation - prevents blown-out bright areas in bokeh
         # This technique maintains the brightness relationship between sharp and blurred regions
@@ -799,3 +984,53 @@ class ZDefocusLegacy:
 
         # Convert all outputs to BHWC format as expected by ComfyUI
         return (_to_bhwc_safe(out), _to_bhwc_safe(vis), _to_bhwc_safe(coc_gray_rgb), in_focus_mask)
+
+    def _progressive_blur_legacy(self, img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg):
+        """Memory-efficient progressive blur processing for large images in Legacy node."""
+        # Direct interpolation approach without storing full blur stack
+        radii = torch.linspace(0.0, max_blur_px, levels, device=img.device)
+
+        # Calculate which blur levels each pixel needs
+        idx_f = (coc_px / max(max_blur_px, 1e-6)) * (levels - 1)
+        idx0 = idx_f.floor().clamp(0, levels - 1)
+        idx1 = (idx0 + 1).clamp(0, levels - 1)
+        w1 = (idx_f - idx0)
+        w0 = 1.0 - w1
+
+        # Process blur levels on-demand to save memory
+        unique_levels = torch.unique(torch.cat([idx0.flatten(), idx1.flatten()]))
+        blur_cache = {}
+
+        # Generate only the blur levels we actually need
+        for level in unique_levels:
+            level_int = int(level.item())
+            if level_int == 0:
+                blur_cache[level_int] = img
+            else:
+                blur_radius = float(radii[level_int].item())
+                blur_cache[level_int] = _apply_aperture_blur(
+                    img, blur_radius, bokeh_shape, blades, rotation_deg
+                )
+
+        # Blend results efficiently
+        B, C, H, W = img.shape
+        out = torch.zeros_like(img)
+
+        # Accumulate contributions from each blur level
+        for level in unique_levels:
+            level_int = int(level.item())
+            level_tensor = torch.tensor(level_int, device=img.device)
+
+            # Masks for pixels that need this blur level
+            mask0 = (idx0 == level_tensor).float()
+            mask1 = (idx1 == level_tensor).float()
+
+            if mask0.any():
+                contribution = blur_cache[level_int] * w0.unsqueeze(1) * mask0.unsqueeze(1)
+                out = out + contribution
+
+            if mask1.any():
+                contribution = blur_cache[level_int] * w1.unsqueeze(1) * mask1.unsqueeze(1)
+                out = out + contribution
+
+        return out
