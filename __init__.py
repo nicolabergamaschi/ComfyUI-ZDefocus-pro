@@ -20,3 +20,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # Legacy node
     "ZDefocusLegacy": "Z-Defocus Pro (Legacy All-in-One)",
 }
+
+# For ComfyUI compatibility
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

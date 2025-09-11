@@ -9,20 +9,7 @@
 #
 # This modular approach allows users to:
 # 1. Visualize depth and experiment with focus points before processing
-# 2. Reuse analysis result                # GPU-optimized blur stack creation with memory management
-        levels = max(3, min(int(num_levels), 12))  # Limit levels to prevent memory issues
-
-        # Memory optimization: process large images in smaller chunks if needed
-        B, C, H, W = img.shape
-        total_pixels = B * C * H * W
-        memory_limit = 2e8  # ~800MB limit for blur stack
-
-        if total_pixels * levels > memory_limit:
-            # Use progressive processing for large images
-            result = self._progressive_blur(img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg)
-        else:
-            # Standard processing for smaller images
-            result = self._standard_blur(img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg)F variations
+# 2. Reuse analysis results across multiple DOF variations
 # 3. Build more complex depth-based workflows
 
 import math
@@ -603,60 +590,35 @@ class ZDefocusPro:
         coc_norm = coc_norm.clamp(0.0, 1.0)
         coc_px = (coc_norm * max_blur_px).clamp(0.0, max_blur_px)
 
-        # Create blur stack
-        levels = max(3, int(num_levels))
-        radii = torch.linspace(0.0, max_blur_px, levels, device=img.device)
+        # GPU-optimized blur stack creation with memory management
+        levels = max(3, min(int(num_levels), 12))  # Limit levels to prevent memory issues
 
-        # Build blur pyramid
-        blurred = [img]  # Level 0: no blur
-        for i, r in enumerate(radii[1:], 1):
-            blur_radius = float(r.item())
-            blurred_level = _apply_aperture_blur(
-                img, blur_radius,
-                bokeh_shape=bokeh_shape,
-                blades=blades,
-                rotation_deg=rotation_deg
-            )
-            blurred.append(blurred_level)
+        # Memory optimization: process large images in smaller chunks if needed
+        B, C, H, W = img.shape
+        total_pixels = B * C * H * W
+        memory_limit = 2e8  # ~800MB limit for blur stack
 
-        stack = torch.stack(blurred, dim=0)  # (L,B,3,H,W)
-        del blurred
-
-        # Blend between blur levels
-        idx_f = (coc_px / max(max_blur_px, 1e-6)) * (levels - 1)
-        idx0 = idx_f.floor().clamp(0, levels - 1)
-        idx1 = (idx0 + 1).clamp(0, levels - 1)
-        w1 = (idx_f - idx0).unsqueeze(1)
-        w0 = 1.0 - w1
-
-        def gather_level(level_idx):
-            L = stack.shape[0]
-            li = level_idx.long().clamp(0, L - 1)
-            out = torch.zeros_like(img)
-            for l in range(L):
-                mask = (li == l).float()
-                if mask.any():
-                    out = out + stack[l] * mask
-            return out
-
-        out0 = gather_level(idx0)
-        out1 = gather_level(idx1)
-        out = out0 * w0 + out1 * w1
+        if total_pixels * levels > memory_limit:
+            # Use progressive processing for large images
+            result = self._progressive_blur(img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg)
+        else:
+            # Standard processing for smaller images
+            result = self._standard_blur(img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg)
 
         # Highlight preservation
         if preserve_highlights:
             ref_blur_radius = max(1.0, max_blur_px * 0.25)
             ref = _apply_aperture_blur(img, ref_blur_radius,
                                        bokeh_shape=bokeh_shape, blades=blades, rotation_deg=rotation_deg)
-            base = _apply_aperture_blur(out, ref_blur_radius,
+            base = _apply_aperture_blur(result, ref_blur_radius,
                                         bokeh_shape=bokeh_shape, blades=blades, rotation_deg=rotation_deg)
 
             eps = 1e-6
             gain = (ref + eps) / (base + eps)
-            out = out * gain.clamp(0.5, 2.0)
+            result = result * gain.clamp(0.5, 2.0)
 
-        out = out.clamp(0.0, 1.0)
-        return (_to_bhwc_safe(out),)
+        result = result.clamp(0.0, 1.0)
+        return (_to_bhwc_safe(result),)
 
     def _standard_blur(self, img, coc_px, max_blur_px, levels, bokeh_shape, blades, rotation_deg):
         """Standard blur processing for smaller images."""
