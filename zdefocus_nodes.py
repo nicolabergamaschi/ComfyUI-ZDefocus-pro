@@ -699,31 +699,46 @@ class ZDefocusPro:
         w1 = (idx_f - idx0)
         w0 = 1.0 - w1
 
-        # Efficient GPU-native interpolation using advanced indexing
+        # Get dimensions
         B, C, H, W = img.shape
         L = stack.shape[0]
 
-        # Reshape for efficient indexing: (L,B,C,H,W) -> (L,BCHW)
-        stack_reshaped = stack.view(L, B * C * H * W)
+        # Ensure coc_px matches the spatial dimensions of img
+        if coc_px.shape[-2:] != (H, W):
+            # Resize coc_px to match image spatial dimensions
+            coc_px = torch.nn.functional.interpolate(
+                coc_px.unsqueeze(1) if coc_px.dim() == 3 else coc_px,
+                size=(H, W), mode='nearest'
+            ).squeeze(1)
 
-        # Create linear indices for each pixel position
-        pixel_indices = torch.arange(B * C * H * W, device=img.device, dtype=torch.long)
+            # Recalculate indices with corrected coc_px
+            idx_f = (coc_px / max(max_blur_px, 1e-6)) * (levels - 1)
+            idx0 = idx_f.floor().clamp(0, levels - 1)
+            idx1 = (idx0 + 1).clamp(0, levels - 1)
+            w1 = (idx_f - idx0)
+            w0 = 1.0 - w1
 
-        # Expand indices for gathering from blur levels
-        idx0_expanded = idx0.view(-1).long()  # (BCHW,)
-        idx1_expanded = idx1.view(-1).long()  # (BCHW,)
+        # Ensure indices have the right shape and type
+        idx0 = idx0.view(B, H, W).long()
+        idx1 = idx1.view(B, H, W).long()
+        w0 = w0.view(B, H, W)
+        w1 = w1.view(B, H, W)
 
-        # Advanced indexing for smooth GPU-based gathering
-        out0_flat = stack_reshaped[idx0_expanded, pixel_indices]
-        out1_flat = stack_reshaped[idx1_expanded, pixel_indices]
+        # GPU-optimized blending using gather operation
+        # Reshape stack for gathering: (L, B, C, H, W) -> (B, L, C, H, W)
+        stack_permuted = stack.permute(1, 0, 2, 3, 4)  # (B, L, C, H, W)
 
-        # Reshape back to image dimensions
-        out0 = out0_flat.view(B, C, H, W)
-        out1 = out1_flat.view(B, C, H, W)
+        # Expand indices for gathering across channels: (B, H, W) -> (B, 1, H, W) -> (B, C, H, W)
+        idx0_expanded = idx0.unsqueeze(1).expand(B, C, H, W)
+        idx1_expanded = idx1.unsqueeze(1).expand(B, C, H, W)
 
-        # Smooth interpolation with proper broadcasting
-        w0_expanded = w0.unsqueeze(1).expand_as(out0)
-        w1_expanded = w1.unsqueeze(1).expand_as(out1)
+        # Gather blur levels for each pixel
+        out0 = torch.gather(stack_permuted, 1, idx0_expanded.unsqueeze(1)).squeeze(1)  # (B, C, H, W)
+        out1 = torch.gather(stack_permuted, 1, idx1_expanded.unsqueeze(1)).squeeze(1)  # (B, C, H, W)
+
+        # Blend with weights
+        w0_expanded = w0.unsqueeze(1)  # (B, 1, H, W)
+        w1_expanded = w1.unsqueeze(1)  # (B, 1, H, W)
         out = out0 * w0_expanded + out1 * w1_expanded
 
         return out
